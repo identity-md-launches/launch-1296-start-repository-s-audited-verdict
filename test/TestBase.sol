@@ -37,7 +37,7 @@ abstract contract TestBase is Test {
             new VerdictOracle(address(intake), address(token), vm.addr(SIGNER_KEY), ACTION, PRICE, address(this), 0);
         burn = new VerdictBurnVault();
         markets = new VerdictMarkets(
-            address(oracle), address(token), treasury, address(burn), address(this), 100, 50, 50, 500 ether
+            address(oracle), address(token), treasury, address(burn), address(this), 100, 50, 50, 500 ether, 0.25 ether
         );
         markets.setCreatorAllowed(creator, true);
         address[5] memory users = [address(this), creator, alice, bob, carol];
@@ -64,6 +64,7 @@ abstract contract TestBase is Test {
         p.disputeWindow = 1 days;
         p.voidAfter = p.answerUntil + 1 hours;
         p.bounty = 2 * PRICE;
+        p.settlerReward = 0;
     }
 
     function create() internal returns (uint256 id) {

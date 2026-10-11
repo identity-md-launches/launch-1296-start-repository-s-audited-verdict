@@ -104,13 +104,18 @@ contract VerdictMarketsValidationTest is TestBase {
 
     function test_feeCapAndPoolCapConstructor() public {
         vm.expectRevert(VerdictMarkets.InvalidFees.selector);
-        new VerdictMarkets(address(oracle), address(token), treasury, address(burn), alice, 100, 200, 201, 1);
+        new VerdictMarkets(
+            address(oracle), address(token), treasury, address(burn), alice, 100, 200, 201, 1, 0.25 ether
+        );
         vm.expectRevert(VerdictMarkets.InvalidFees.selector);
-        new VerdictMarkets(address(oracle), address(token), treasury, address(burn), alice, 65535, 65535, 65535, 1);
+        new VerdictMarkets(
+            address(oracle), address(token), treasury, address(burn), alice, 65535, 65535, 65535, 1, 0.25 ether
+        );
         vm.expectRevert(VerdictMarkets.InvalidCap.selector);
-        new VerdictMarkets(address(oracle), address(token), treasury, address(burn), alice, 100, 50, 50, 0);
-        VerdictMarkets maxFees =
-            new VerdictMarkets(address(oracle), address(token), treasury, address(burn), alice, 100, 200, 200, 1);
+        new VerdictMarkets(address(oracle), address(token), treasury, address(burn), alice, 100, 50, 50, 0, 0.25 ether);
+        VerdictMarkets maxFees = new VerdictMarkets(
+            address(oracle), address(token), treasury, address(burn), alice, 100, 200, 200, 1, 0.25 ether
+        );
         assertEq(maxFees.treasuryFeeBps(), 200);
     }
 

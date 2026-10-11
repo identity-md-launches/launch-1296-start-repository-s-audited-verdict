@@ -35,6 +35,7 @@ contract VerdictMarkets is ReentrancyGuard {
         uint256[] bounds;
         bytes32[] keys;
         uint256 bounty;
+        uint256 settlerReward;
     }
 
     struct Market {
@@ -63,6 +64,8 @@ contract VerdictMarkets is ReentrancyGuard {
         bytes32[2] primaryRequests;
         bytes32 escalationRequest;
         uint256 escalationAskedAt;
+        uint256 settlerReward;
+        uint256 rewardsPaid;
     }
 
     error InvalidAddress();
@@ -124,6 +127,7 @@ contract VerdictMarkets is ReentrancyGuard {
     event Finalized(uint256 indexed id, uint8 outcome, uint256 creatorFee, uint256 burnFee, uint256 treasuryFee);
     event Voided(uint256 indexed id);
     event BountyReturned(uint256 indexed id, address indexed creator, uint256 amount);
+    event SettlerRewarded(uint256 indexed id, address indexed settler, uint8 action, uint256 amount);
     event Claimed(uint256 indexed id, address indexed bettor, uint256 amount, bool refund);
 
     IVerdictOracle public immutable oracle;
@@ -134,6 +138,7 @@ contract VerdictMarkets is ReentrancyGuard {
     uint16 public immutable burnFeeBps;
     uint16 public immutable treasuryFeeBps;
     uint256 public immutable maxPoolPerMarket;
+    uint256 public immutable maxSettlerReward;
 
     address public guardian;
     address public pendingGuardian;
@@ -156,7 +161,8 @@ contract VerdictMarkets is ReentrancyGuard {
         uint16 creatorFeeBps_,
         uint16 burnFeeBps_,
         uint16 treasuryFeeBps_,
-        uint256 maxPoolPerMarket_
+        uint256 maxPoolPerMarket_,
+        uint256 maxSettlerReward_
     ) {
         if (
             oracle_ == address(0) || collateral_ == address(0) || treasury_ == address(0) || burnSink_ == address(0)
@@ -173,6 +179,7 @@ contract VerdictMarkets is ReentrancyGuard {
         burnFeeBps = burnFeeBps_;
         treasuryFeeBps = treasuryFeeBps_;
         maxPoolPerMarket = maxPoolPerMarket_;
+        maxSettlerReward = maxSettlerReward_;
         emit GuardianTransferred(address(0), guardian_);
     }
 
@@ -249,10 +256,9 @@ contract VerdictMarkets is ReentrancyGuard {
         if (bodyHash == escalationHash) revert InvalidBody();
         if (oracle.asset() != address(collateral)) revert OracleAssetMismatch();
         uint256 cost = oracle.price();
-        // Divide rather than multiply, so even a misconfigured enormous oracle price fails cleanly.
-        if (p.bounty / 2 < cost) revert InsufficientBounty();
+        _checkBounty(p.bounty, cost, p.settlerReward);
         uint256 received = _pull(msg.sender, p.bounty);
-        if (received / 2 < cost) revert InsufficientBounty();
+        _checkBounty(received, cost, p.settlerReward);
         id = ++marketCount;
         Market storage m = _markets[id];
         m.params = p;
@@ -262,6 +268,7 @@ contract VerdictMarkets is ReentrancyGuard {
         m.escalationBodyHash = escalationHash;
         m.outcomes = outcomes;
         m.bountyRemaining = received;
+        m.settlerReward = p.settlerReward;
         emit MarketCreated(id, msg.sender, bodyHash, escalationHash, body, escalationBody, uri, agentId);
     }
 
@@ -291,6 +298,7 @@ contract VerdictMarkets is ReentrancyGuard {
         }
         m.lastPrimaryAsk = block.timestamp;
         requestId = _ask(id, m, body, false);
+        _pay(msg.sender, _recordSettlerReward(id, m, 0));
     }
 
     function escalate(uint256 id, bytes calldata body) external nonReentrant returns (bytes32 requestId) {
@@ -348,6 +356,7 @@ contract VerdictMarkets is ReentrancyGuard {
         // A replacement restarts a full dispute window exactly once.
         m.disputeEnds = block.timestamp + p.disputeWindow;
         emit OutcomeProposed(id, a.requestId, m.outcome, a.panelSize, replacement, m.disputeEnds);
+        _pay(msg.sender, _recordSettlerReward(id, m, 1));
     }
 
     function finalize(uint256 id) external nonReentrant {
@@ -363,8 +372,10 @@ contract VerdictMarkets is ReentrancyGuard {
         m.fees = creatorFee + burnFee + treasuryFee;
         m.remainingPayout = m.pool - m.fees;
         m.remainingWinningStake = winningPool;
+        uint256 reward = _recordSettlerReward(id, m, 2);
         uint256 bounty = _releaseBounty(id, m);
         emit Finalized(id, m.outcome, creatorFee, burnFee, treasuryFee);
+        _pay(msg.sender, reward);
         _pay(m.creator, creatorFee + bounty);
         _pay(burnSink, burnFee);
         _pay(treasury, treasuryFee);
@@ -382,8 +393,10 @@ contract VerdictMarkets is ReentrancyGuard {
             revert WrongState();
         }
         m.status = Status.Voided;
+        uint256 reward = _recordSettlerReward(id, m, 3);
         uint256 bounty = _releaseBounty(id, m);
         emit Voided(id);
+        _pay(msg.sender, reward);
         _pay(m.creator, bounty);
     }
 
@@ -445,6 +458,24 @@ contract VerdictMarkets is ReentrancyGuard {
         emit OracleAsked(id, requestId, escalation, cost);
     }
 
+    /// @dev Account before transferring. Terminal calls release bounty only after this deduction.
+    function _recordSettlerReward(uint256 id, Market storage m, uint8 action) private returns (uint256 amount) {
+        if (m.settlerReward == 0) return 0;
+        uint256 reserve;
+        // Resolve and accepted proposals have already used at least one ask. With asks < 2,
+        // exactly one remains. Read its price now, including changes since creation or the ask.
+        if (action < 2 && m.asks < 2) reserve = oracle.price();
+        if (m.bountyRemaining > reserve) amount = Math.min(m.settlerReward, m.bountyRemaining - reserve);
+        m.bountyRemaining -= amount;
+        m.rewardsPaid += amount;
+        emit SettlerRewarded(id, msg.sender, action, amount);
+    }
+
+    function _checkBounty(uint256 bounty, uint256 cost, uint256 reward) private pure {
+        // Equivalent to bounty >= 2 * cost + 5 * reward without overflowing either product or sum.
+        if (bounty / 2 < cost || (bounty - 2 * cost) / 5 < reward) revert InsufficientBounty();
+    }
+
     function _releaseBounty(uint256 id, Market storage m) private returns (uint256 bounty) {
         bounty = m.bountyRemaining;
         m.bountyRemaining = 0;
@@ -469,7 +500,7 @@ contract VerdictMarkets is ReentrancyGuard {
             p.questionHash == bytes32(0) || p.dataChainId == 0 || p.fromBlock > p.toBlock || p.minPanelSize < 5
                 || p.minAgreed == 0 || p.closeAt <= block.timestamp || p.closeAt > p.answerFrom
                 || p.answerFrom >= p.answerUntil || p.answerUntil >= p.voidAfter || p.disputeWindow < 1 hours
-                || p.disputeWindow > 3 days
+                || p.disputeWindow > 3 days || p.settlerReward > maxSettlerReward
         ) {
             revert InvalidParams();
         }

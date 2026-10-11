@@ -57,6 +57,8 @@ No real wallet extension, physical mobile device or human screen reader was used
 
 ## Original contract documentation
 
+The Solidity source now includes the settler-reward adaptation for the next Sepolia launch; see [ADAPTATION.md](ADAPTATION.md). The website and export still target launch 1277 and are intentionally unchanged. The new deployment uses Intake v2 and the constructor handoff in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 Verdict is an immutable parimutuel prediction market application for Sepolia (chain **11155111**). Creators fund oracle requests; bettors deposit IMD into outcome buckets; authenticated IdentityMD oracle answers establish a provisional outcome; a dispute window precedes settlement. The deployment set is exactly **VerdictBurnVault → VerdictOracle → VerdictMarkets**. There is no launch token, proxy, upgrade, or separate liquidity pool.
 
 ## Build and verification
@@ -71,7 +73,7 @@ The root `foundry.toml` pins Solidity **0.8.26**, Cancun, optimizer 200 runs, vi
 
 The suite includes the protocol's fixed EIP-712 digest/signature vector, independently encoded struct hash, domain/selector checks, exact Sepolia constructor rehearsal, adversarial callbacks, configuration rotation, all outcome types, deadline boundaries, entry controls, transfer-fee receipt accounting, reentrancy, actual token-transfer conservation, and a three-market stateful invariant. The invariant compares on-chain balances with each market's liabilities throughout randomized calls, then settles and drains every market. Independent review and reviewer-authored regressions are in [docs/INDEPENDENT_REVIEW.md](docs/INDEPENDENT_REVIEW.md) and [test/IndependentReview.t.sol](test/IndependentReview.t.sol).
 
-The contracts are now live on Sepolia. The website verification independently checked their deployed bytecode and ABI hashes; see [web/validation/contract-verification.json](web/validation/contract-verification.json). No wallet credentials were read and no transactions were broadcast by the website task. The original deployment procedure remains in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); earlier contract test results are in [docs/VERIFICATION.md](docs/VERIFICATION.md).
+The launch-1277 contracts are live on Sepolia. The website verification checked that earlier deployment's bytecode and ABI hashes, not this new adaptation; see [web/validation/contract-verification.json](web/validation/contract-verification.json). No wallet credentials were read and no transactions were broadcast by the website task. The original deployment procedure remains in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); earlier contract test results are in [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
 ## Contracts
 
@@ -93,19 +95,19 @@ The owner can `proposeConfig(Config)` then `acceptConfig()` after the immutable 
 
 ### VerdictMarkets
 
-The oracle, collateral, treasury, burn sink, fee rates, and per-market cap are immutable. Constructors perform no external calls and require no deployed dependency code. Aggregate fees cannot exceed 500 bps; the cap must be nonzero.
+The oracle, collateral, treasury, burn sink, fee rates, per-market pool cap, and maximum settler reward are immutable. Constructors perform no external calls and require no deployed dependency code. Aggregate fees cannot exceed 500 bps; the cap must be nonzero.
 
 The guardian may pause/unpause entry, add/remove creators, permanently disable the creator allowlist, propose a new guardian (who accepts), or renounce while unpaused with the allowlist disabled. It cannot move tokens, change terms, change outcomes, prevent asks/proposals/settlement/claims, or upgrade the application. Initially the allowlist is **on and empty**; the guardian must add creators or disable it. Renouncing with the allowlist still on reverts; disable it before relinquishing the guardian role.
 
 ## Market lifecycle
 
-1. **Create.** An admitted creator calls `createMarket(p, body, escalationBody, uri, agentId)` and funds at least twice the current oracle price. Both requested and actually received bounty must cover two asks. The market stores the received bounty, terms, primary body hash, and optional escalation body hash. `MarketCreated` publishes both complete bodies, URI, creator, and agent attribution. The URI and agent ID are event metadata, not authority. A nonempty escalation body must differ from the primary body.
+1. **Create.** An admitted creator calls `createMarket(p, body, escalationBody, uri, agentId)` and sets `settlerReward` (the appended Params field) no higher than `maxSettlerReward`. Both requested and actually received bounty must be at least `2 * oracle.price() + 5 * settlerReward`. The market stores the received bounty, terms, primary body hash, and optional escalation body hash. `MarketCreated` publishes both complete bodies, URI, creator, and agent attribution. The URI and agent ID are event metadata, not authority. A nonempty escalation body must differ from the primary body.
 2. **Bet.** Anyone calls `bet(id, outcome, amount, agentId)` before `closeAt` while entry is unpaused. Credits use the actual balance increase. Pool cap includes all credited bets, excludes bounty, and applies separately to each market. Bets cannot be withdrawn, transferred, or redirected before settlement.
 3. **Ask.** Anyone calls `resolve(id, body)` during `[answerFrom, answerUntil)` while there is no provisional outcome. The exact published primary body is required. A second primary ask is available at least 24 hours after the first, only if that market's first request is still pending. Deliveries purchased by other callers or markets do not block this retry. A delivered but unusable answer still blocks retry under the specified no-delivery rule. There are at most **two bounty-funded asks total**, shared between primary retries and escalation.
 4. **Propose.** Anyone submits the complete delivered attestation. The first proposal must authenticate against the primary body hash and one of the market's own recorded primary Intake request IDs. Question hash, answer type, data chain, and exact block window must match. The panel must meet `minPanelSize`, and agreement must meet `minAgreed` and signed quorum; quorum must be positive and agreement cannot exceed panel size. The signed `issuedAt` must be in the inclusive interval `[answerFrom, answerUntil]`. The first proposal is accepted from `answerFrom` until strictly before `voidAfter`, including after `answerUntil` for a timely signed answer. Direct purchases through VerdictOracle cannot establish an outcome; permissionless callers must trigger the market's `resolve` instead.
 5. **Dispute.** A primary proposal starts its dispute window. Before it ends and before `answerUntil`, anyone may call `escalate(id, escalationBody)` once, spending one remaining ask and extending the window to at least 24 hours from that call. A matching escalation answer can replace the primary once, only inside the current window, and must have at least twice the current panel size. It starts one fresh full dispute window. A replacement must answer the market's recorded `escalate` request, so pre-bought answers cannot consume its dispute opportunity. Its issuance must be at or after that escalation ask and at or before the extended dispute deadline. Escalation delivery/replacement may occur after `answerUntil` or `voidAfter` while the current dispute window is still open. The replacement restarts the window only once, preserving finalization even past `voidAfter`.
-6. **Finalize.** At or after the current dispute deadline, any caller can finalize a provisional market with a funded winning bucket, regardless of `voidAfter`. Separately rounded creator, burn, and treasury fees are paid from the **entire pool**, and all unspent bounty returns to the creator. A missing escalation answer leaves the primary outcome in place.
-7. **Claim or refund.** Winners call `claim(id)` once per address. Each receives `stake * (pool - fees) / winningPool`, rounded down; the last winning claimant receives the exact remaining payout. If no provisional outcome exists at `voidAfter`, anyone can void the market. A provisional outcome with no winning stake can be voided after its dispute window ends. Voiding charges no fees and returns unspent bounty; every bettor then uses the same `claim(id)` to receive all their credited stakes across outcomes. A funded provisional winner cannot be timeout-voided.
+6. **Finalize.** At or after the current dispute deadline, any caller can finalize a provisional market with a funded winning bucket, regardless of `voidAfter`. Separately rounded creator, burn, and treasury fees are paid from the **entire pool**, and the bounty remaining after the finalizer reward returns to the creator. A missing escalation answer leaves the primary outcome in place.
+7. **Claim or refund.** Winners call `claim(id)` once per address. Each receives `stake * (pool - fees) / winningPool`, rounded down; the last winning claimant receives the exact remaining payout. If no provisional outcome exists at `voidAfter`, anyone can void the market. A provisional outcome with no winning stake can be voided after its dispute window ends. Voiding charges no fees and returns the bounty remaining after the void caller's reward; every bettor then uses the same `claim(id)` to receive all their credited stakes across outcomes. A funded provisional winner cannot be timeout-voided.
 
 Dispute duration is 1 hour through 3 days inclusive. Creation requires a future close and `closeAt <= answerFrom < answerUntil < voidAfter`. `minPanelSize >= 5`, `minAgreed > 0`, nonzero question/data-chain identifiers, and an ordered block interval are required. `minAgreed` may exceed `minPanelSize`; a larger actual panel can satisfy both. No maximum lifetime or minimum gap between `answerUntil` and `voidAfter` is imposed.
 
@@ -120,12 +122,20 @@ Dispute duration is 1 hour through 3 days inclusive. Creation requires a future 
 
 Lists use the final bucket for empty lists or an unmatched first element, even if a later element matches. Arrays with duplicate keys, unordered bounds, extraneous terms, or more than eight resulting outcomes are rejected. Answers use `abi.encode(value)`; malformed ABI cannot establish an outcome.
 
+### Settler rewards
+
+The constructor appends `maxSettlerReward` after `maxPoolPerMarket`; this launch sets it to 0.25 IMD. `Market` and `getMarket` expose `settlerReward` and cumulative `rewardsPaid`, and the immutable terms also include `params.settlerReward`.
+
+Each successful resolve, each accepted first/replacement proposal, finalize, and void pays `msg.sender` from that market's bounty. Escalate earns no reward. Resolve/propose preserve `oracle.price() * (2 - asks)` using the current price after the action. If the reserve would be breached, the reward is clipped to the available surplus, possibly zero; already inadequate bounty does not cause reward arithmetic to revert. Finalize/void reserve nothing: they account for the reward, return the remainder, and transfer the reward before the creator payment, after all state changes.
+
+`SettlerRewarded(id, settler, action, amount)` indexes the market and caller. Action codes are 0 resolve, 1 propose, 2 finalize, 3 void. A positive configured reward emits once per successful action even when clipped to zero. A configured reward of zero skips reward accounting, transfers, additional price reads, and reward events, preserving the previous behavior.
+
 ## Accounting and trust assumptions
 
 For each completely claimed market:
 
 ```text
-payouts + refunds + fees + oracleSpend + returnedBounty
+payouts + refunds + fees + oracleSpend + rewardsPaid + returnedBounty
     == creditedBetDeposits + creditedCreatorBounty
 ```
 
@@ -141,7 +151,7 @@ Primary issuance remains restricted to `[answerFrom, answerUntil]`, and new asks
 
 Oracle delivery is attempted once. A refused request, missing answer, expired result, invalid signature, or failed callback is not refunded. Failed callbacks leave a pending record but no funds in VerdictOracle; market timeout refunds provide economic recovery of principal, not already-spent oracle fees. Rotating a signer does not revoke its authority over requests that already pinned it. ERC-1271 signers are supported, but their own behavior determines signature validity and callback gas usage; the supplied signer is an EOA.
 
-Direct token donations are outside deposit accounting and cannot be recovered. Unclaimed legitimate payouts stay available indefinitely; no-dust settlement assumes all entitled bettors claim. There is no automatic keeper or keeper reward: creators or independent callers must ask, propose, settle, and claim. Caps and panel minima limit the application mechanically; they do not guarantee truthful answers.
+Direct token donations are outside deposit accounting and cannot be recovered. Unclaimed legitimate payouts stay available indefinitely; no-dust settlement assumes all entitled bettors claim. There is no automatic keeper: creators or independent callers must ask, propose, settle, and claim. Progressing a market earns its configured bounty-funded reward; claims and escalation are unrewarded. Caps and panel minima limit the application mechanically; they do not guarantee truthful answers.
 
 ## Files and responsibilities
 

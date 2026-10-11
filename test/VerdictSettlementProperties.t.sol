@@ -16,7 +16,8 @@ contract VerdictSettlementPropertiesTest is TestBase {
             creatorBps,
             burnBps,
             treasuryBps,
-            cap
+            cap,
+            0.25 ether
         );
         markets.setCreatorAllowed(creator, true);
         address[4] memory users = [creator, alice, bob, carol];
